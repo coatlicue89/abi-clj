@@ -53,7 +53,7 @@
 (def params (encode/param {:type "tuple"
                            :components [{:type "bytes"
                                          :name "actions"}
-                                        {:type "bytes[2]"
+                                        {:type "bytes[]"
                                          :name "params"}]
                            :value {:actions "0x0111"
                                    :params  [collect-params take-params]}}))
