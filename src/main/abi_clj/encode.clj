@@ -31,9 +31,9 @@
                                      (get value (:name item))))
                       components)
                  value)
-        pre-encoded (->> (zipmap components values)
-                         (map (fn [[item value]] [item (param (assoc item
-                                                                     :value value))])))
+        pre-encoded (map (fn [item value] [item (param (assoc item :value value))])
+                         components
+                         values)
         static-cursor (apply + (->> pre-encoded
                                     (map (comp utils.abi/item->size first))))
 

@@ -162,3 +162,22 @@
                                          :name "foo"}]
                            :value [{:foo "wagmi"
                                     :nft 10}]}))))))
+
+(t/deftest tuple-components-order
+  (t/testing "Should encode every component when several are identical"
+    (t/is (= (str "0x"
+                  "0000000000000000000000000000000000000000000000000000000000000001"
+                  "0000000000000000000000000000000000000000000000000000000000000002")
+             (sut/param {:type "tuple"
+                         :components [{:type "uint256"} {:type "uint256"}]
+                         :value [1 2]}))))
+
+  (t/testing "Should keep the components order on structs with more than 8 fields"
+    (let [components (mapv (fn [i] {:type "uint256" :name (str "f" i)}) (range 10))
+          expected (apply str "0x" (map #(format "%064x" %) (range 10)))]
+      (t/is (= expected
+               (sut/param {:type "tuple" :components components :value (vec (range 10))})))
+      (t/is (= expected
+               (sut/param {:type "tuple"
+                           :components components
+                           :value (into {} (map (fn [i] [(keyword (str "f" i)) i]) (range 10)))}))))))

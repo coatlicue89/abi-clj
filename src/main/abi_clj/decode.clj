@@ -2,11 +2,12 @@
   (:require
    [abi-clj.utils :as utils.abi]
    [abi-clj.utils.hex :as utils.hex]
-   [clojure.math :as math]
    [clojure.string :as str])
   (:import
    [java.lang Integer]
-   [java.math BigInteger]))
+   [java.math BigInteger]
+   [java.nio.charset StandardCharsets]
+   [org.bouncycastle.util.encoders Hex]))
 
 (defn- remove-0x [data]
   (str/replace data #"^0x" ""))
@@ -29,6 +30,35 @@
 
 (defmulti param #'decode-dispatch)
 
+(defn- decode-components
+  "Decodes `components` laid out sequentially starting at `base` (the start of
+  the tuple body, which is also what dynamic offsets are relative to). Returns
+  a vector with the decoded values, in order."
+  [components data base]
+  (loop [cursor base components (seq components) res []]
+    (if-let [component (first components)]
+      (let [dynamic? (utils.abi/item->is-dynamic? component)
+            decoded (param (assoc component :data data :cursor cursor :offset (if dynamic? base cursor)))]
+        (recur (+ cursor (utils.abi/item->size component)) (next components) (conj res decoded)))
+      res)))
+
+(defn- name-values
+  "Returns a map keyed by component name when every component is named,
+  otherwise the values as a vector."
+  [components values]
+  (if (every? :name components)
+    (into {} (map (fn [component value] [(keyword (:name component)) value]) components values))
+    (vec values)))
+
+(defn- dynamic-bytes-at
+  "Hex (without 0x) of the length prefixed bytes pointed by the offset stored at `cursor`."
+  [data cursor ini-offset]
+  (let [offset (param {:type "uint256" :data data :cursor cursor})
+        len-cursor (long (+ ini-offset (* 2 offset)))
+        len (long (param {:type "uint256" :data data :cursor len-cursor}))
+        data-cursor (+ len-cursor 64)]
+    (subs data data-cursor (+ data-cursor (* 2 len)))))
+
 (defmethod param :tuple
   [{data :data
     components :components
@@ -36,27 +66,10 @@
     ini-offset :offset
     :or {ini-cursor 0 ini-offset 0} :as item}]
   (let [data (remove-0x data)
-        with-names? (every? :name components)
-        dynamic? (utils.abi/item->is-dynamic? item)
-        offset (if dynamic?
+        offset (if (utils.abi/item->is-dynamic? item)
                  (param {:type "uint256" :data data :cursor ini-cursor})
-                 0)
-        ini-data-cursor (+ ini-offset (* 2 offset))
-
-        res (loop [cursor ini-data-cursor component (first components) components (rest components) res []]
-              (if component
-                (let [size (utils.abi/item->size component)
-                      dynamic? (utils.abi/item->is-dynamic? component)
-                      decoded (param (assoc component :data data :cursor cursor :offset (if dynamic? ini-data-cursor cursor)))
-                      append (if with-names?
-                               [(keyword (:name component)) decoded] decoded)]
-
-                  (recur (+ cursor size) (first components) (rest components) (conj res append)))
-                res))]
-
-    (if with-names?
-      (into {} res)
-      (vec res))))
+                 0)]
+    (name-values components (decode-components components data (+ ini-offset (* 2 offset))))))
 
 (defmethod param :vector
   [{data :data
@@ -122,34 +135,41 @@
                   Integer/parseInt)]
     (utils.hex/concat [(subs (extract-data-at data cursor) 0 (* size 2))])))
 
-(defn- to-utf-str [b] (String. b "UTF-8"))
-
 (defmethod param :string
   [{data :data cursor :cursor ini-offset :offset :or {cursor 0 ini-offset 0}}]
-  (let [data (remove-0x data)
-        offset (param {:type "uint256" :data data :cursor cursor})
-        len (param {:type "uint256" :data data :cursor (+ ini-offset (* 2 offset))})
-        data-cursor (+ ini-offset (* 2 offset) 64)
-        parts (math/ceil (/ len 64))]
-    (->> (subs data data-cursor (+ data-cursor (* parts 64)))
-         (partition-all 2)
-         (map #(Integer/parseInt (str/join %) 16))
-         (filter (complement #{0}))
-         byte-array
-         to-utf-str)))
+  (String. ^bytes (Hex/decode ^String (dynamic-bytes-at (remove-0x data) cursor ini-offset))
+           StandardCharsets/UTF_8))
+
+(defmethod param :dbytes
+  [{data :data cursor :cursor ini-offset :offset :or {cursor 0 ini-offset 0}}]
+  (str "0x" (dynamic-bytes-at (remove-0x data) cursor ini-offset)))
 
 (defmethod param :default [_] (throw (ex-info "Not implemented" {:causes :lazyness})))
+
+(defn- hashed-when-indexed?
+  "Reference types (strings, bytes, arrays and structs) are not stored in the
+  topic when indexed, only their keccak hash is."
+  [item]
+  (or (utils.abi/item->is-dynamic? item)
+      (= "tuple" (:type item))
+      (str/includes? (:type item) "[")))
 
 (defn event
   [{abi-item :abi-item event :event}]
   (let [indexed (filter :indexed (:inputs abi-item))
-        not-indexed (filter (comp not :indexed) (:inputs abi-item))]
-    (param {:type "tuple" :components (concat indexed not-indexed) :data (utils.hex/concat (conj (vec (rest (:topics event)))
-                                                                                                 (:data event)))})))
+        not-indexed (remove :indexed (:inputs abi-item))
+        from-topics (map (fn [item topic]
+                           (if (hashed-when-indexed? item)
+                             topic
+                             (param (assoc item :data topic))))
+                         indexed
+                         (rest (:topics event)))
+        from-data (decode-components not-indexed (remove-0x (:data event)) 0)]
+    (name-values (concat indexed not-indexed) (concat from-topics from-data))))
 
 (defn function-result
   [{abi-item :abi-item data :data}]
-  (let [first-item (first (:outputs abi-item))]
-    (if (= 1 (count (:outputs abi-item)))
-      (param (assoc first-item :data data))
-      (param {:type "tuple" :components (:outputs abi-item) :data data}))))
+  (let [outputs (:outputs abi-item)]
+    (if (= 1 (count outputs))
+      (param (assoc (first outputs) :data data))
+      (name-values outputs (decode-components outputs (remove-0x data) 0)))))
