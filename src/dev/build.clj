@@ -8,6 +8,13 @@
 (def basis (delay (b/create-basis {:project "deps.edn"})))
 (def jar-file (format "target/%s-%s.jar" (name lib) version))
 
+;; Clojars rejects POMs without a license.
+(def pom-data
+  [[:licenses
+    [:license
+     [:name "Eclipse Public License 1.0"]
+     [:url "https://opensource.org/license/epl-1-0/"]]]])
+
 (defn clean [_]
   (b/delete {:path "target"}))
 
@@ -16,7 +23,8 @@
                 :lib lib
                 :version version
                 :basis @basis
-                :src-dirs ["src/main"]})
+                :src-dirs ["src/main"]
+                :pom-data pom-data})
   (b/copy-dir {:src-dirs ["src/main"]
                :target-dir class-dir})
   (b/jar {:class-dir class-dir
