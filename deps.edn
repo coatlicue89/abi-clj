@@ -3,7 +3,7 @@
 
  :aliases
  {:build {:extra-paths ["src/dev"]
-          :extra-deps {io.github.clojure/tools.build {:git/tag "v0.6.2" :git/sha "226fb52"}
+          :extra-deps {io.github.clojure/tools.build {:git/tag "v0.10.5" :git/sha "2a21b7a"}
                        slipset/deps-deploy {:mvn/version "0.2.2"}}
           :ns-default build}
 
