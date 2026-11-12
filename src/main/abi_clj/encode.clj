@@ -8,77 +8,74 @@
    [java.nio.charset StandardCharsets]
    [org.bouncycastle.util.encoders Hex]))
 
+(def ^:private ^BigInteger two-pow-256 (.shiftLeft BigInteger/ONE 256))
+
+(defn- ->biginteger
+  ^BigInteger [value]
+  (if (string? value)
+    (BigInteger. ^String value)
+    (biginteger value)))
+
+(defn- length-word
+  "32 bytes word, without 0x, for a length or an offset."
+  ^String [^long n]
+  (let [hex (Long/toHexString n)]
+    (str (utils.hex/zeros (- 64 (.length hex))) hex)))
+
 (defn- encode-dispatch [{type :type}]
-  (cond
-    (re-matches #"^((uint|int|bool|address|bytes|tuple|string)(\d+)?)((\[\d*\])+)$" type) :vector
-    (= type "tuple")                   :tuple
-    (= type "bool")                    :bool
-    (= type "address")                 :address
-    (= type "string")                  :string
-    (re-matches #"^uint.*" type)       :unumber
-    (re-matches #"^int.*" type)        :number
-    (re-matches #"^bytes(\d+)$" type)  :bytes
-    (re-matches #"^bytes$" type)       :dbytes))
+  (utils.abi/type-kind type))
 
 (defmulti param #'encode-dispatch)
 
+(defn- head-tail
+  "Encodes `items` (abi items with their :value) one after the other. Static
+  items go inline in the head; dynamic ones go to the tail, leaving in the
+  head their offset from the start of the encoding. `head-size` is the size
+  of the head in bytes."
+  [items dynamic? ^long head-size]
+  (let [head (StringBuilder. "0x")
+        tail (StringBuilder.)]
+    (doseq [item items]
+      (let [encoded (utils.hex/strip-0x (param item))]
+        (if (dynamic? item)
+          (do (.append head (length-word (+ head-size (quot (.length tail) 2))))
+              (.append tail encoded))
+          (.append head encoded))))
+    (.append head tail)
+    (.toString head)))
+
 (defmethod param :tuple
   [{value :value
-    components :components
-    :as item}]
+    components :components}]
   (let [values (if (map? value)
                  (map (fn [item] (or (get value (keyword (:name item)))
                                      (get value (:name item))))
                       components)
                  value)
-        pre-encoded (->> (zipmap components values)
-                         (map (fn [[item value]] [item (param (assoc item
-                                                                     :value value))])))
-        static-cursor (apply + (->> pre-encoded
-                                    (map (comp utils.abi/item->size first))))
-
-        encoded (loop [dcursor static-cursor [item value] (first pre-encoded) pre-encoded (rest pre-encoded) static [] dynamic []]
-                  (if item
-                    (if (utils.abi/item->is-dynamic? item)
-                      (let [cursor-delta (* (utils.hex/size value) 2)
-                            offset (param {:type "uint256" :value (/ dcursor 2)})]
-                        (recur (+ dcursor cursor-delta) (first pre-encoded) (rest pre-encoded) (conj static offset) (conj dynamic value)))
-                      (recur dcursor (first pre-encoded) (rest pre-encoded) (conj static value) dynamic))
-                    (utils.hex/concat static dynamic)))]
-    encoded))
+        items (map (fn [item value] (assoc item :value value)) components values)
+        head-size (quot (long (reduce + 0 (map utils.abi/item->size items))) 2)]
+    (head-tail items utils.abi/item->is-dynamic? head-size)))
 
 (defmethod param :vector
   [{value :value
     type  :type
     :as item}]
-  (let [match (re-matches #"^((uint|int|bool|address|bytes|tuple|string)(\d+)?)((\[\d*\])+)$" type)
-        type (second match)
-        dimension (nth match 4)
-        rem-dim (re-matches #"((\[\d+\])+)(\[\d+\])$" dimension)
-        conc-dim (when rem-dim (second rem-dim))
-        dynamic? (utils.abi/item->is-dynamic? item)
-        child-item (assoc item :type (str type conc-dim))
-        dynamic-child-item? (utils.abi/item->is-dynamic? child-item)
+  (let [[child-type length] (utils.abi/vector-type type)
+        child-item (assoc item :type child-type)
+        dynamic-child? (utils.abi/item->is-dynamic? child-item)
         len (count value)
-        ini-cursor (* len 64)
-        encoded (if dynamic-child-item?
-                  (loop [dcursor ini-cursor v (first value) values (rest value) static [] dynamic []]
-                    (if v
-                      (let [encoded (param (assoc child-item :value v))
-                            cursor-delta (* (utils.hex/size encoded) 2)
-                            offset (param {:type "uint256" :value (/ dcursor 2)})]
-                        (recur (+ dcursor cursor-delta) (first values) (rest values) (conj static offset) (conj dynamic encoded)))
-                      (utils.hex/concat static dynamic)))
-                  (->> value
-                       (map #(param (assoc child-item :value %)))
-                       utils.hex/concat))]
-    (if dynamic?
-      (utils.hex/concat [(param {:type "uint256" :value len}) encoded])
-      encoded)))
+        encoded (head-tail (map #(assoc child-item :value %) value)
+                           (constantly dynamic-child?)
+                           (* 32 len))]
+    (if length
+      encoded
+      (str "0x" (length-word len) (utils.hex/strip-0x encoded)))))
 
 (defmethod param :bool
   [{value :value}]
-  (utils.hex/pad (if value "0x1" "0x0")))
+  (if value
+    "0x0000000000000000000000000000000000000000000000000000000000000001"
+    "0x0000000000000000000000000000000000000000000000000000000000000000"))
 
 (defmethod param :address
   [{value :value}]
@@ -90,33 +87,30 @@
 
 (defmethod param :unumber
   [{value :value}]
-  (utils.hex/pad (format "%x" (BigInteger. (str value)))))
+  (utils.hex/pad (.toString (->biginteger value) 16)))
 
 (defmethod param :number
   [{value :value}]
-  (utils.hex/pad (format "%x" (if (< value 0)
-                                (.add (BigInteger. (str value)) (.shiftLeft (BigInteger. (str "1")) (* 32 8)))
-                                (BigInteger. (str value))))))
+  (let [n (->biginteger value)]
+    (utils.hex/pad (.toString (if (neg? (.signum n))
+                                (.add n two-pow-256)
+                                n)
+                              16))))
+
+(defn- length-prefixed
+  "Encodes dynamic `hex` data (without 0x): its length in bytes followed by
+  the data right padded to a multiple of 32 bytes."
+  [^String hex]
+  (let [n (.length hex)]
+    (str "0x" (length-word (quot n 2)) hex (utils.hex/zeros (mod (- n) 64)))))
 
 (defmethod param :dbytes
   [{value :value}]
-  (let [size (utils.hex/size value)
-        padded (if (not= 0 (mod size 32))
-                 (utils.hex/pad value {:dir :right :size (* 32 (Math/ceil (/ size 32)))})
-                 value)]
-    (utils.hex/concat [(param {:type "uint256" :value size}) padded])))
+  (length-prefixed (utils.hex/strip-0x value)))
 
 (defmethod param :string
   [{value :value}]
-  (let [hex-value (Hex/toHexString (.getBytes value StandardCharsets/UTF_8))
-        size (utils.hex/size hex-value)
-        parts-length (int (Math/ceil (/ size 32)))]
-    (->> (range 0 parts-length)
-         (map (fn [i] (let [p (subs hex-value (* i 64) (min (count hex-value) (* (inc i) 64)))]
-                        (if (= i (dec parts-length))
-                          (utils.hex/pad p {:dir :right})
-                          p))))
-         (utils.hex/concat [(param {:type "uint256" :value size})]))))
+  (length-prefixed (Hex/toHexString (.getBytes ^String value StandardCharsets/UTF_8))))
 
 (defmethod param :default [_] (throw (ex-info "Not implemented" {:causes :lazyness})))
 

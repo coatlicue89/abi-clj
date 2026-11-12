@@ -1,64 +1,69 @@
 (ns abi-clj.utils
   (:require
    [clojure.string :as str]
-   [clojure.walk])
-  (:import
-   [java.lang Integer]))
+   [clojure.walk]))
 
-(defn- dispatch-param [{type :type}]
-  (cond
-    (re-matches #"^((uint|int|bool|address|bytes|tuple|string)(\d+)?)((\[\d*\])+)$" type) :vector
-    (= type "tuple")                   :tuple
-    (= type "bool")                    :static
-    (= type "address")                 :static
-    (= type "string")                  :string
-    (re-matches #"^uint.*" type)       :static
-    (re-matches #"^int.*" type)        :static
-    (re-matches #"^bytes(\d+)$" type)  :static
-    (re-matches #"^bytes$" type)       :dbytes))
+(defn- digits?
+  "True when `s` has only digits (at least one) from index `from`."
+  [^String s ^long from]
+  (let [n (.length s)]
+    (and (< from n)
+         (loop [i from]
+           (or (= i n)
+               (and (Character/isDigit (.charAt s (int i)))
+                    (recur (inc i))))))))
 
-(defmulti item->is-dynamic? #'dispatch-param)
+(defn type-kind
+  "Classifies a solidity type: :vector, :tuple, :bool, :address, :string,
+  :unumber, :number, :bytes (fixed size) or :dbytes (dynamic). Returns nil
+  for unsupported types."
+  [^String type]
+  (when type
+    (case type
+      "tuple"   :tuple
+      "bool"    :bool
+      "address" :address
+      "string"  :string
+      "bytes"   :dbytes
+      (cond
+        (.endsWith type "]")                                 :vector
+        (.startsWith type "uint")                            :unumber
+        (.startsWith type "int")                             :number
+        (and (.startsWith type "bytes") (digits? type 5))    :bytes
+        :else                                                nil))))
 
-(defmethod item->is-dynamic? :vector
-  [{type :type}]
-  (let [match (re-matches #"^((uint|int|bool|address|bytes|tuple|string)(\d+)?)((\[\d*\])+)$" type)
-        type (second match)
-        dimension (nth match 4)
-        rem-dim (re-matches #"((\[\d*\])+)(\[\d*\])$" dimension)
-        conc-dim (when rem-dim (second rem-dim))
-        dynamic? (= "[]" (last match))]
-    (or dynamic? (item->is-dynamic? {:type (str type conc-dim)}))))
+(defn vector-type
+  "Splits an array type on its outermost dimension, returning
+  [child-type length], with a nil length for dynamic arrays.
+  \"uint256[3][]\" => [\"uint256[3]\" nil], \"uint256[3]\" => [\"uint256\" 3]"
+  [^String type]
+  (let [open (.lastIndexOf type "[")
+        length (.substring type (inc open) (dec (.length type)))]
+    [(.substring type 0 open)
+     (when-not (.isEmpty length) (Long/parseLong length))]))
 
-(defmethod item->is-dynamic? :tuple
-  [{components :components}]
-  (some item->is-dynamic? components))
-
-(defmethod item->is-dynamic? :string
-  [_] true)
-
-(defmethod item->is-dynamic? :dbytes
-  [_] true)
-
-(defmethod item->is-dynamic? :default
-  [_] false)
-
-(defmulti item->size #'dispatch-param)
-
-(defmethod item->size :tuple
-  [{components :components :as item}]
-  (if (item->is-dynamic? item)
-    64
-    (apply + (map item->size components))))
-
-(defmethod item->size :vector
+(defn item->is-dynamic?
   [{type :type :as item}]
-  (if (item->is-dynamic? item)
-    64
-    (let [match (re-seq #"\[(\d+)\]" type)
-          type (re-matches #"^((uint|int|bool|address|bytes|tuple)(\d+)?).*$" type)]
-      (apply * (item->size {:type (second type)}) (map (comp Integer/parseInt second) match)))))
+  (case (type-kind type)
+    (:string :dbytes) true
+    :tuple            (boolean (some item->is-dynamic? (:components item)))
+    :vector           (let [[child length] (vector-type type)]
+                        (or (nil? length)
+                            (item->is-dynamic? (assoc item :type child))))
+    false))
 
-(defmethod item->size :default [_] 64)
+(defn item->size
+  "Size, in hex chars, the item takes in the head of its container."
+  [{type :type :as item}]
+  (case (type-kind type)
+    :tuple  (if (item->is-dynamic? item)
+              64
+              (reduce + 0 (map item->size (:components item))))
+    :vector (if (item->is-dynamic? item)
+              64
+              (let [[child length] (vector-type type)]
+                (* length (item->size (assoc item :type child)))))
+    64))
 
 (defmulti item->human-readable :type)
 
@@ -102,11 +107,16 @@
              (assoc x :components (map #(dissoc % :name :indexed) (:components x)))
              x)) xs))
 
+(defn- canonical-type
+  "Type as it appears in a signature: tuples are expanded to their components'
+  types, keeping the array dimensions. tuple[2][] => (uint256,bool)[2][]"
+  [{^String type :type components :components}]
+  (if (.startsWith type "tuple")
+    (str "(" (str/join "," (map canonical-type components)) ")" (.substring type 5))
+    type))
+
 (defmethod item->signature "function"
   [{inputs :inputs fname :name}]
-  (->> {:type "tuple" :components inputs}
-       dissoc-name
-       item->human-readable
-       (str fname)))
+  (str fname "(" (str/join "," (map canonical-type inputs)) ")"))
 
 (defmethod item->signature :default [_] (throw (ex-info "Not implemented" {:causes :lazyness})))

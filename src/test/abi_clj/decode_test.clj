@@ -150,3 +150,120 @@
     #_(t/testing "Should encode string"
         (t/is (= "0x00000000000000000000000000000000000000000000000000000000000000057761676d69000000000000000000000000000000000000000000000000000000"
                  (sut/encode-param {:type "string" :data "wagmi"}))))))
+
+(def ^:private w32  "0000000000000000000000000000000000000000000000000000000000000020")
+(def ^:private w40  "0000000000000000000000000000000000000000000000000000000000000040")
+(def ^:private w5   "0000000000000000000000000000000000000000000000000000000000000005")
+(def ^:private w7   "0000000000000000000000000000000000000000000000000000000000000007")
+(def ^:private wagmi "7761676d69000000000000000000000000000000000000000000000000000000")
+
+(t/deftest decode-dynamic-bytes-and-strings
+  (t/testing "Should decode a string < 32 bytes"
+    (t/is (= "wagmi"
+             (sut/param {:type "string" :data (str "0x" w32 w5 wagmi)}))))
+
+  (t/testing "Should decode a string > 32 bytes without truncating it"
+    (t/is (= "Lorem ipsum dolor sit amet, consectetur adipiscing elit."
+             (sut/param {:type "string"
+                         :data (str "0x" w32
+                                    "0000000000000000000000000000000000000000000000000000000000000038"
+                                    "4c6f72656d20697073756d20646f6c6f722073697420616d65742c20636f6e73"
+                                    "656374657475722061646970697363696e6720656c69742e0000000000000000")}))))
+
+  (t/testing "Should decode an empty string"
+    (t/is (= ""
+             (sut/param {:type "string"
+                         :data (str "0x" w32 "0000000000000000000000000000000000000000000000000000000000000000")}))))
+
+  (t/testing "Should decode bytes < 32"
+    (t/is (= "0x042069"
+             (sut/param {:type "bytes"
+                         :data (str "0x" w32
+                                    "0000000000000000000000000000000000000000000000000000000000000003"
+                                    "0420690000000000000000000000000000000000000000000000000000000000")}))))
+
+  (t/testing "Should decode bytes > 32, keeping zero bytes"
+    (t/is (= "0x70a08231000000000000000000000000d8da6bf26964af9d7eed9e03e53415d37aa96045"
+             (sut/param {:type "bytes"
+                         :data (str "0x" w32
+                                    "0000000000000000000000000000000000000000000000000000000000000024"
+                                    "70a08231000000000000000000000000d8da6bf26964af9d7eed9e03e53415d3"
+                                    "7aa9604500000000000000000000000000000000000000000000000000000000")}))))
+
+  (t/testing "Should decode bytes inside a tuple"
+    (t/is (= {:n 7N :b "0x042069"}
+             (sut/param {:type "tuple"
+                         :components [{:type "uint256" :name "n"} {:type "bytes" :name "b"}]
+                         :data (str "0x" w32 w7 w40
+                                    "0000000000000000000000000000000000000000000000000000000000000003"
+                                    "0420690000000000000000000000000000000000000000000000000000000000")})))))
+
+(t/deftest decode-function-result
+  (t/testing "Should decode a single output"
+    (t/is (= 7N
+             (sut/function-result {:abi-item {:outputs [{:type "uint256" :name "a"}]}
+                                   :data (str "0x" w7)}))))
+
+  (t/testing "Should decode multiple static outputs"
+    (t/is (= {:a 7N :b 5N}
+             (sut/function-result {:abi-item {:outputs [{:type "uint256" :name "a"} {:type "uint256" :name "b"}]}
+                                   :data (str "0x" w7 w5)}))))
+
+  (t/testing "Should decode multiple outputs when some are dynamic"
+    (t/is (= {:a 7N :s "wagmi"}
+             (sut/function-result {:abi-item {:outputs [{:type "uint256" :name "a"} {:type "string" :name "s"}]}
+                                   :data (str "0x" w7 w40 w5 wagmi)})))
+    (t/is (= [7N "wagmi"]
+             (sut/function-result {:abi-item {:outputs [{:type "uint256"} {:type "string"}]}
+                                   :data (str "0x" w7 w40 w5 wagmi)})))))
+
+(t/deftest decode-event
+  (let [topics ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+                "0x00000000000000000000000014dc79964da2c08b23698b3d3cc7ca32193d9955"]]
+    (t/testing "Should decode an event with static data"
+      (t/is (= {:from "0x14dc79964da2c08b23698b3d3cc7ca32193d9955" :amount 7N}
+               (sut/event {:abi-item {:type "event"
+                                      :inputs [{:type "address" :name "from" :indexed true}
+                                               {:type "uint256" :name "amount" :indexed false}]}
+                           :event {:topics topics :data (str "0x" w7)}}))))
+
+    (t/testing "Should decode an event with dynamic data"
+      (t/is (= {:from "0x14dc79964da2c08b23698b3d3cc7ca32193d9955" :amount 7N :memo "wagmi"}
+               (sut/event {:abi-item {:type "event"
+                                      :inputs [{:type "address" :name "from" :indexed true}
+                                               {:type "uint256" :name "amount" :indexed false}
+                                               {:type "string" :name "memo" :indexed false}]}
+                           :event {:topics topics :data (str "0x" w7 w40 w5 wagmi)}}))))))
+
+(defn- words [& xs]
+  (apply str "0x" (map #(if (string? %) % (format "%064x" %)) xs)))
+
+(t/deftest decode-nested-arrays
+  (t/testing "Should decode a dynamic array inside a tuple"
+    (t/is (= {:a 7N :xs [1N 2N]}
+             (sut/param {:type "tuple"
+                         :components [{:type "uint256" :name "a"} {:type "uint256[]" :name "xs"}]
+                         :data (words 0x20 7 0x40 2 1 2)}))))
+
+  (t/testing "Should decode a uint256[][]"
+    (t/is (= [[1N 2N] [3N]]
+             (sut/param {:type "uint256[][]" :data (words 0x20 2 0x40 0xa0 2 1 2 1 3)}))))
+
+  (t/testing "Should decode a fixed size array of dynamic items"
+    (t/is (= ["wagmi" "wagmi"]
+             (sut/param {:type "string[2]" :data (words 0x20 0x40 0x80 5 wagmi 5 wagmi)}))))
+
+  (t/testing "Should decode what follows a fixed size array of structs"
+    (t/is (= {:ps [{:x 1N :y 2N} {:x 3N :y 4N}] :z 9N}
+             (sut/param {:type "tuple"
+                         :components [{:type "tuple[2]"
+                                       :name "ps"
+                                       :components [{:type "uint256" :name "x"} {:type "uint256" :name "y"}]}
+                                      {:type "uint256" :name "z"}]
+                         :data (words 1 2 3 4 9)})))))
+
+(t/deftest decode-int-limits
+  (t/is (= 57896044618658097711785492504343953926634992332820282019728792003956564819967N
+           (sut/param {:type "int256" :data (str "0x7" (apply str (repeat 63 "f")))})))
+  (t/is (= -57896044618658097711785492504343953926634992332820282019728792003956564819968N
+           (sut/param {:type "int256" :data (str "0x8" (apply str (repeat 63 "0")))}))))

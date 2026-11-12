@@ -1,67 +1,76 @@
 (ns abi-clj.utils.hex
-  (:require
-   [clojure.string :as str])
+  (:refer-clojure :exclude [concat subs])
   (:import
    (java.nio.charset StandardCharsets)
    (org.bouncycastle.jcajce.provider.digest Keccak$Digest256)
    (org.bouncycastle.util.encoders Hex)))
 
+(defn strip-0x
+  "Returns `value` as a string without its leading 0x, if any."
+  ^String [value]
+  (let [s (str value)]
+    (if (.startsWith s "0x")
+      (.substring s 2)
+      s)))
+
+(def ^:private ^String zeros-64 (apply str (repeat 64 "0")))
+
+(defn zeros
+  "A string with `n` zeros, empty when `n` is not positive."
+  ^String [n]
+  (let [n (long n)]
+    (cond
+      (<= n 0)  ""
+      (<= n 64) (.substring zeros-64 0 (int n))
+      :else     (let [sb (StringBuilder. (int n))]
+                  (dotimes [_ n] (.append sb \0))
+                  (.toString sb)))))
+
 (defn ->number
   [hex]
-  (bigint (BigInteger. (str/replace hex #"0x" "") 16)))
+  (bigint (BigInteger. (strip-0x hex) 16)))
 
 (defn number->hex
   [num]
-  (format "0x%x" (BigInteger. (str num))))
+  (str "0x" (.toString (biginteger (if (string? num) (BigInteger. ^String num) num)) 16)))
 
 (defn pad
   ([value] (pad value {}))
   ([value {:keys [dir size] :or {size 32 dir :left}}]
-   (let [s (str/replace value #"^0x" "")
-         pad (str/join (take (- (* size 2) (count s)) (repeat "0")))]
-     (apply str "0x" (if (= dir :left) [pad s] [s pad])))))
+   (let [s (strip-0x value)
+         padding (zeros (- (* (long size) 2) (.length s)))]
+     (if (= dir :left)
+       (str "0x" padding s)
+       (str "0x" s padding)))))
 
-(defn concat [& values]
-  (->> (reduce clojure.core/concat [] values)
-       (map #(str/replace % #"^0x" ""))
-       (clojure.core/concat ["0x"])
-       (str/join)))
+(defn concat
+  "Concatenates collections of hex strings into a single 0x prefixed one."
+  [& values]
+  (let [sb (StringBuilder. "0x")
+        append (fn [^StringBuilder sb v] (.append sb (strip-0x v)))]
+    (doseq [value values]
+      (if (string? value)
+        (append sb value)
+        (reduce append sb value)))
+    (.toString sb)))
 
 (defn size [value]
-  (-> value
-      (str/replace #"^0x" "")
-      count
-      (/ 2)))
+  (/ (.length (strip-0x value)) 2))
 
 (defn subs
   ([s start]
-   (-> s
-       (str/replace #"^0x" "")
-       (clojure.core/subs start)
-       concat))
+   (str "0x" (clojure.core/subs (strip-0x s) start)))
   ([s start end]
-   (-> s
-       (str/replace #"^0x" "")
-       (clojure.core/subs start end)
-       concat)))
+   (str "0x" (clojure.core/subs (strip-0x s) start end))))
 
-(defn- str->byte-arr [s]
-  (let [without0x (str/replace s #"^0x" "")
-        len (count without0x)
-        even (= 0 (rem len 2))
-        char-seq (seq without0x)
-        [head body] (if even
-                      [[] char-seq]
-                      [[(Character/digit (first char-seq) 16)] (rest char-seq)])]
-    (->>
-     body
-     (partition-all 2)
-     (map (fn [[a b]] (+ (bit-shift-left (Character/digit a 16) 4) (Character/digit b 16))))
-     (into head)
-     byte-array)))
+(defn- str->byte-arr ^bytes [s]
+  (let [without0x (strip-0x s)]
+    (Hex/decode ^String (if (even? (.length without0x))
+                          without0x
+                          (str "0" without0x)))))
 
 (defn- k-dispatch [s]
-  (cond (and (string? s) (re-matches #"^0x.*" s)) :hex-str
+  (cond (and (string? s) (.startsWith ^String s "0x")) :hex-str
         (string? s)            :str
         :else                  :bytes))
 
@@ -72,12 +81,11 @@
   (keccak-256 (str->byte-arr s)))
 
 (defmethod keccak-256 :str
-  [s]
+  [^String s]
   (keccak-256 (.getBytes s StandardCharsets/UTF_8)))
 
 (defmethod keccak-256 :bytes
-  [input]
-  (let [digest (Keccak$Digest256.)
-        len (count input)]
-    (.update digest input 0 len)
-    (concat [(Hex/toHexString (.digest digest))])))
+  [^bytes input]
+  (let [digest (Keccak$Digest256.)]
+    (.update digest input 0 (alength input))
+    (str "0x" (Hex/toHexString (.digest digest)))))
