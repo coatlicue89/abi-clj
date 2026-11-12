@@ -234,3 +234,36 @@
                                                {:type "uint256" :name "amount" :indexed false}
                                                {:type "string" :name "memo" :indexed false}]}
                            :event {:topics topics :data (str "0x" w7 w40 w5 wagmi)}}))))))
+
+(defn- words [& xs]
+  (apply str "0x" (map #(if (string? %) % (format "%064x" %)) xs)))
+
+(t/deftest decode-nested-arrays
+  (t/testing "Should decode a dynamic array inside a tuple"
+    (t/is (= {:a 7N :xs [1N 2N]}
+             (sut/param {:type "tuple"
+                         :components [{:type "uint256" :name "a"} {:type "uint256[]" :name "xs"}]
+                         :data (words 0x20 7 0x40 2 1 2)}))))
+
+  (t/testing "Should decode a uint256[][]"
+    (t/is (= [[1N 2N] [3N]]
+             (sut/param {:type "uint256[][]" :data (words 0x20 2 0x40 0xa0 2 1 2 1 3)}))))
+
+  (t/testing "Should decode a fixed size array of dynamic items"
+    (t/is (= ["wagmi" "wagmi"]
+             (sut/param {:type "string[2]" :data (words 0x20 0x40 0x80 5 wagmi 5 wagmi)}))))
+
+  (t/testing "Should decode what follows a fixed size array of structs"
+    (t/is (= {:ps [{:x 1N :y 2N} {:x 3N :y 4N}] :z 9N}
+             (sut/param {:type "tuple"
+                         :components [{:type "tuple[2]"
+                                       :name "ps"
+                                       :components [{:type "uint256" :name "x"} {:type "uint256" :name "y"}]}
+                                      {:type "uint256" :name "z"}]
+                         :data (words 1 2 3 4 9)})))))
+
+(t/deftest decode-int-limits
+  (t/is (= 57896044618658097711785492504343953926634992332820282019728792003956564819967N
+           (sut/param {:type "int256" :data (str "0x7" (apply str (repeat 63 "f")))})))
+  (t/is (= -57896044618658097711785492504343953926634992332820282019728792003956564819968N
+           (sut/param {:type "int256" :data (str "0x8" (apply str (repeat 63 "0")))}))))

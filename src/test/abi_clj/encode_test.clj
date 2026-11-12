@@ -181,3 +181,53 @@
                (sut/param {:type "tuple"
                            :components components
                            :value (into {} (map (fn [i] [(keyword (str "f" i)) i]) (range 10)))}))))))
+
+(defn- words [& xs]
+  (apply str "0x" (map #(if (string? %) % (format "%064x" %)) xs)))
+
+(t/deftest nested-arrays
+  (t/testing "Should encode a uint256[][]"
+    (t/is (= (words 2 0x40 0xa0 2 1 2 1 3)
+             (sut/param {:type "uint256[][]" :value [[1 2] [3]]}))))
+
+  (t/testing "Should not length prefix a fixed size array of dynamic items"
+    (t/is (= (words 0x40 0x80
+                    5 "7761676d69000000000000000000000000000000000000000000000000000000"
+                    3 "6f6e650000000000000000000000000000000000000000000000000000000000")
+             (sut/param {:type "string[2]" :value ["wagmi" "one"]}))))
+
+  (t/testing "Should encode the example from the ABI spec: g(uint256[][],string[])"
+    (t/is (= (words 0x40 0x140
+                    2 0x40 0xa0 2 1 2 1 3
+                    3 0x60 0xa0 0xe0
+                    3 "6f6e650000000000000000000000000000000000000000000000000000000000"
+                    3 "74776f0000000000000000000000000000000000000000000000000000000000"
+                    5 "7468726565000000000000000000000000000000000000000000000000000000")
+             (sut/param {:type "tuple"
+                         :components [{:type "uint256[][]"} {:type "string[]"}]
+                         :value [[[1 2] [3]] ["one" "two" "three"]]})))))
+
+(t/deftest signature
+  (t/testing "Should compute a function selector"
+    (t/is (= "0xa9059cbb"
+             (sut/signature {:type "function"
+                             :name "transfer"
+                             :inputs [{:type "address" :name "to"} {:type "uint256" :name "amount"}]}))))
+
+  (t/testing "Should expand structs and arrays of structs"
+    (t/is (= "0x82ad56cb"
+             (sut/signature {:type "function"
+                             :name "aggregate3"
+                             :inputs [{:type "tuple[]"
+                                       :name "calls"
+                                       :components [{:type "address" :name "target"}
+                                                    {:type "bool" :name "allowFailure"}
+                                                    {:type "bytes" :name "callData"}]}]}))))
+
+  (t/testing "Should compute an event topic"
+    (t/is (= "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+             (sut/signature {:type "event"
+                             :name "Transfer"
+                             :inputs [{:type "address" :name "from" :indexed true}
+                                      {:type "address" :name "to" :indexed true}
+                                      {:type "uint256" :name "value"}]})))))
